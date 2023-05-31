@@ -1,0 +1,278 @@
+---
+title: "Field Goal Kicking using Bayesian Stats"
+author: "Collin Cook"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, cache = TRUE)
+
+# Libraries
+library(readxl)
+library(tidyverse)
+library(coda)
+library(rjags)
+```
+
+## Setup
+
+This project is modified from an assignment in a Bayesian analysis course at Ohio State. 
+
+To begin, we select a pre-determined sample of kickers from our data, with variables indicating the kicker (ID's from 1-25), a binary made/miss indicator, and the distance where the kick was attempted from. 
+
+```{R}
+# Import Full data
+data <- read_excel("FG_Kicks.xlsx")
+
+# Selection of kickers
+# 22 3 13 25 4 10 24 1 20
+players <- c(22, 3, 13, 25, 4, 10, 24, 1, 20)
+kicks <- data %>% filter(Player %in% players)
+
+# Preview
+knitr::kable(head(kicks, 5))
+# Attempts per kicker
+knitr::kable(table(kicks$Player))
+```
+
+Next, we will use this data to run a Bayesian Hierarchical model to predict the probability of success of a made kick at any distance for each kicker. This is done use the JAGS specifications in R.
+
+## The Model
+
+We wish to model the probability of success for a kick at some given distance, knowing that we have multiple kickers with different rates of success. We start by assuming that the outcome of the kick for each kicker is conditionally independent
+$$
+p(\textrm{Made}|\alpha,\beta)=\prod_{j=1}^{N_P} \prod_{i=1}^{N_K}
+p(\textrm{Made}_{ij}|\alpha_j,\beta_j)
+$$
+
+We can model the outcome of the kicks as 
+$$
+\textrm{Made}_{ij} \sim \textrm{Bernoulli}(\theta_{ij})
+$$
+
+In this setup, we have distinctions of individual kick attempt $i=1...N_K$ for each of the $j=1...N_P=9$ kickers in our data. Now, we can model the probability $\theta$ as a logistic regression where the probability of a made field goal depends on distance, and is different for each kicker.
+$$
+\textrm{logit} (\theta_{ij}) = \alpha_j + \beta_j \cdot \textrm{Distance}_{ij}
+$$
+For this model, we expect negative values for $\beta$ to model how probability goes down as distance increases. In this case, $\alpha_j$ is the baseline log-odds of making a field goal, and $\beta_j$ is the decrease in log-odds for each additional yard.
+
+Next, we assume conditional independence for $\alpha,\beta$
+$$
+p(\alpha,\beta|\mu_\alpha,\mu_\beta,\sigma_\alpha,\sigma_\beta)=\prod_{j=1}^{N_P}
+p(\alpha_j|\mu_\alpha,\sigma_\alpha)p(\beta_j|\mu_\beta,\sigma_\beta)
+$$
+
+Since we expect negative values for some coefficients, we can model them as 
+$$
+\alpha_j \sim \textrm{Normal}(\mu_\alpha, \sigma_\alpha) \quad 
+\beta_j \sim \textrm{Normal}(\mu_\beta,\sigma_\beta)
+$$ 
+
+Now, the $\mu$ values track the mean baseline log-odds and distance coefficient for each kicker, and the $\sigma$ values track their standard deviation. This also allows us to provide an informed initial guess and range for the model to explore. In addition to the kick data given, we know that ~98% of kicks are made around 25 yards, and drops to ~60% when pushed to around 55 yards. Using these points, the following logistics estimate was generated:
+$$
+\textrm{logit} (\theta_\textrm{prior}) \approx 3-\frac{5.125}{100} \textrm{Distance}
+$$
+
+Therefore, we set priors of 
+$$
+\mu_\alpha \sim \textrm{Normal}(3,1) \quad \textrm{and} \quad
+\mu_\beta \sim \textrm{Normal}(0.05, 0.01)
+$$
+and guess
+$$
+\sigma_\alpha \sim \textrm{Normal}(1,0.01) \quad \textrm{and} \quad
+\sigma_\beta \sim \textrm{Normal}(1, 0.01)
+$$
+
+## Coding the Model
+
+```{R}
+# JAGS Code
+# Setup ------------------------------------------------------------------------
+n <- length(kicks$Made)
+# Create new Player ID, ordered 1-9
+kicks$ID <- rep(NA, n)
+for (i in 1:n){
+  kicks$ID[i] <- which(players == kicks$Player[i])
+}
+NPlayers <- length(players)
+
+# Data list
+mydata <- list(n=n, NPlayers=NPlayers, Made=kicks$Made, Distance=kicks$Distance,
+               ID=kicks$ID)
+# Parameter Initialization - use prior knowledge and exact line fit estimates
+myinit <- list(mu.a=3, mu.b=5.125/100, 
+               sigma.a=0.1, sigma.b=0.05)
+
+# Iteration Control ------------------------------------------------------------
+niters <- 50000 # Full amount
+nbruns <- 5000 # Burn-in
+nadapt <- 1000
+nchains <- 2 # Number of chains
+
+# JAGS Model -------------------------------------------------------------------
+mod <- "model {
+  # Likelihood
+  for (i in 1:n) {
+    Made[i] ~ dbern(theta[i])
+    logit(theta[i]) = alpha[ID[i]] + beta[ID[i]]*Distance[i]
+  }
+  
+  # Priors
+  for (j in 1:NPlayers) {
+    alpha[j] ~ dnorm(mu.a, sigma.a)
+    beta[j] ~ dnorm(mu.b, sigma.b)
+  }
+  mu.a ~ dnorm(3, 1)
+  mu.b ~ dnorm(0.05, 0.01)
+  sigma.a ~ dnorm(1, 0.01)
+  sigma.b ~ dnorm(1, 0.01)
+}"
+
+set.seed(1730)
+# Initialize model -------------------------------------------------------------
+fit <- jags.model(textConnection(mod), data=mydata, inits=myinit,
+                  n.chains=nchains, n.adapt=nadapt)
+# Sample from model ------------------------------------------------------------
+fit.samples <- coda.samples(fit, c("alpha", "beta","mu.a", "mu.b", 
+                                   "sigma.a", "sigma.b"), n.iter=niters)
+```
+
+## Results
+
+The above model was fit in R using JAGS to assess the hierarchical nature of the data. Using 50,000 iterations with 5,000 burn-in iterations, 2 chains were run the check for convergence. Below are the summary statistics for the modeled variables for each kicker.
+
+```{R}
+# Summary Statistics from JAGS
+summary(fit.samples)[1]
+```
+
+With starting values of $\mu_\alpha=3, \mu_\beta=0.05125, \sigma_\alpha=0.1, \sigma_\beta=0.05$, we get different values that still make sense in terms of the model, especially when plotted out (shown in player evaluations). Additionally, we can interpret the $\mu_\alpha=5.31$ and $\mu_\beta=-0.087$ as the league average, and all of the other kickers vary around that baseline.
+
+In the context of kicking field goals, the $\alpha$ coefficients represent the baseline log-odds of successful kick attempts, and these values are all about the same, varying around 5.31. On the other hand, the $\beta$ values vary quite a bit more, showing how variable some kickers are to increased distance. A more extreme distance coefficient means that the logistic regression line becomes steeper, while a value closer to 0 means there is a higher probability of success at higher distances.
+
+The $\sigma$ values represent the deviation in the distributions of $\alpha$ and $\beta$, and it seems that the estimates are quite a ways off from what we initially thought. It appears that this area of the model may not be as accurate as other parameters, but we aren't too interested in these values anyways. 
+
+Next, a select few traceplots are shown, to show convergence of the chains to reasonable values over the many iterations.
+
+```{R, }
+par(mfrow=c(1,2))
+# Trace plots
+# Alpha 3
+traceplot(fit.samples[,2], main="Trace of Alpha[2]")
+traceplot(fit.samples[,14], main="Trace of Beta[5]")
+```
+
+For the plots, we can see that they explore reasonable values but converge after many iterations. And for the summary statistics, we can see similar estimated standard deviations for most of the coefficients, besides the $\sigma$ values. It looks like we have similar yet distinguishable $\alpha$ and $\beta$ values showing the differences between each kicker. 
+
+Using the $\mu_\alpha,\mu_\beta$ estimates, we can plot the average estimated probability of making a field goal from any distance. The logistic regression estimate seems reasonable and represents the increasing difficulty of longer range kicks. Additionally, we can see how the model has changed from the initial guess of the prior, shown as the dashed line below. It seems that the first guess didn't give enough weight to closer kicks, but we were operating on very limited data. 
+
+```{R}
+# Average coefficients
+avg.alpha <- summary(fit.samples)$statistics[19]
+avg.beta <- summary(fit.samples)$statistics[20]
+paste("Avg. Kicker alpha:", avg.alpha); paste("Avg. Kicker beta", avg.beta)
+
+# Find logistic curve for average
+x <- seq(0,100,by=0.1)
+kavg <- 1 / (1 + exp(-(avg.alpha + avg.beta * x)))
+# Prior
+kprior <- 1 / (1 + exp(-(3-5.125/100*x)))
+# Plot
+plot(x, kavg, main="Probability of Made FG - League Avg.", xlab="Distance",
+     ylab="Make Prob. theta", ylim=c(0,1), col="blue", type="l")
+lines(x, kprior, col="purple", lty=2)
+legend(0, 0.4, legend=c("Posterior", "Prior"), lty=c(1,2), 
+       col=c("blue","purple"))
+```
+
+Further, we can plot the probability lines for all the kickers to see the variation between their abilities. 
+
+````{R}
+plot(x, kavg, main="Probability of Made FG - League Avg. Spread", xlab="Distance",
+     ylab="Make Prob. theta", ylim=c(0,1), col="red", type="l")
+for (i in 1:9){
+  a <- summary(fit.samples)$statistics[i]
+  b <- summary(fit.samples)$statistics[i+9]
+  
+  k <- 1 / (1 + exp(-(a + b * x)))
+  lines(x, k, col=i, lty=2)
+}
+```
+
+Before diving into individual players, we can see there is a group of 4 below average kickers and 5 above-average kickers, which are spread out around the prior. This could be done for a much larger sample size, say all kickers in the league or free agency, or perhaps at a college level for the upcoming draft. 
+
+## Individual Kicker Evaluations
+
+To explore some of the players a little more in depth, we proposed an answer for the following scenarios:
+  
+* Kicker A has a league-average contract salary and feels he should be paid more based on his performance.
+* In a game-time situation, player B's coach only wants to attempt a 40-yard field goal if the kicker's probability is 90%.
+  
+We can use the results from before to explore both scenarios.
+
+## Kicker A
+
+To see if kicker A is an above average kicker in the league and deserves a better contract, we can graph the logistic regression with his values versus the league average, based on the sampled $\mu_\alpha,\mu_\beta$ values. Below is the transformed plot of the probability of a successful kick $\theta$ as a function of distance. 
+
+```{R, echo=F}
+# Kicker A coefficients
+A.alpha <- summary(fit.samples)$statistics[1]
+A.beta <- summary(fit.samples)$statistics[10]
+paste("Kicker A alpha:", A.alpha); paste("Kicker A beta:", A.beta)
+```
+
+Therefore, we can model the average probability of a made FG as 
+
+$$
+\textrm{logit}(\theta)=5.312-0.087*\textrm{Distance}
+$$
+
+```{R, echo=F}
+# Find logistic curve for Kicker A
+kA <- 1 / (1 + exp(-(A.alpha + A.beta * x)))
+# Plot
+plot(x, kA, type="l", col="red", ylim=c(0,1), xlab="Distance (yards)",
+     ylab="Kick Prob. theta", main="Kicker A vs League Avg. FG Probability")
+lines(x, kavg, col="blue", lty=2)
+legend(0, 0.4, legend=c("Kicker A", "League Avg"), lty=c(1,2),
+       col=c("red","blue"))
+```
+
+According to the model, it seems that kicker A has an above average probability of making a field goal at every distance. According to the coefficients, kicker A has much lower $\beta$ value, meaning that he has higher probability of making field goals from more distance. 
+
+This can easily be seen in the plot, as the red line clearly lifts above the average line, seeing a noticeable gap at even as few as 30 yards out. Even at 100 yards, the model gives this kicker some probability of making it, even though that probably isn't realistic. 
+
+Either way, this model supports that kicker A is due for a pay raise, since he is clearly performing above the average kicker, at least from out observed data.
+
+## Kicker B
+
+In a game situation, is kicker B dependent enough to try a field goal from 40 yards out? We can again model his probability of a made field goal like kicker A, and look at what his chances are at 40 yards, and we'll try his leg if $\theta\geq.90$
+
+```{R, echo=F}
+# Kicker B coefficients
+B.alpha <- summary(fit.samples)$statistics[2]
+B.beta <- summary(fit.samples)$statistics[11]
+# Kicker B logistic curve
+kB <- 1 / (1 + exp(-(B.alpha + B.beta * x)))
+paste("Kicker B alpha:", B.alpha); paste("Kicker B beta:", B.beta)
+
+# Plot
+plot(x, kB, type="l", col="red", ylim=c(0.5,1), xlim=c(20, 60),
+     xlab="Distance (yards)", ylab="Kick Prob. theta",
+     main="Kicker B vs League Avg. FG Probability")
+lines(x, kavg, col="blue", lty=2)
+abline(h=0.9, v=40, col="green3", lty=2)
+legend(20, 0.7, legend=c("Kicker B", "League Avg"), lty=c(1,2),
+       col=c("red","blue"))
+
+# Compute by hand
+paste("Calculated probability of making 40-yd FG:",
+round(1 / (1 + exp(-(B.alpha + B.beta * 40))),5))
+```
+
+From the model, the probability of making a 40 yard field goal for kicker B is just under 90%, depending on how we want to round. It is worth noting that kicker B, like kicker A, is pretty well above average, and not many kickers would be given this high of an estimated probability in this situation. 
+
+While the model shows some possible deviation, with $\alpha$ and $\beta$ having sample standard deviations of 1.067 and 0.027, we can be pretty sure that the true probability is around 90%, since the estimate almost nearly passes right through that point. 
+
+While a healthy amount of skepticism is fair, expecting 90% accuracy from 40 yards is a stretch for most average NFL kickers. It appears kicker B has an above average kicking ability, and the model shows more confidence in him to make a 40-yarder. Since the estimate is almost exactly 90%, my recommendation would be to attempt the field goal since we have an exceptional kicker on hand. 
