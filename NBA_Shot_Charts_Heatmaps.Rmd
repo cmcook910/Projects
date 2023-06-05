@@ -1,0 +1,196 @@
+---
+title: "NBA Shot Charts & Heatmaps"
+author: "Collin Cook"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, cache = TRUE)
+
+# Libraries Used
+# Standard Libraries
+library(tidyverse)
+library(paletteer)              # Heat map colors
+library(patchwork)              # Arranging plots
+# Sports Specific Libraries
+library(sportyR)                # Courts
+```
+
+## Background
+
+While I have worked with R over the last 4 years at Ohio State, the following plots/packages were not part of any specific course and were self-taught using online guides by Dom Samangy (@DSamangy on Twitter) from Arkansas State's basketball program. 
+
+He also uploaded some interesting shot location data for many NBA seasons (available at his github - https://github.com/DomSamangy/NBA_Shots_04_22), which I have used to play around with.
+
+Below is some of the results of me playing around with the data and trying to pick up new skills. Additionally, I have taken a more formal Sports Economics & Analytics class at OSU where we did more breakdowns of efficiency stats, marketability and competitive balance.
+
+## Data
+
+The Github link provides data for all shots, make or miss, for seasons from 2003-04 to 2021-22, about 3.8 million shots total. Even pairing down the data in R was slow and took a long time, so I used SAS to create smaller datasets.
+
+First, I created the `Lebron` data which contains his shots from his 57 point game against the Wizards in 2017. 
+
+```{R}
+# Import Data
+LeBron_shots <- read.csv("LeBron.csv")
+
+# Variables 
+colnames(LeBron_shots)
+```
+
+Additionally, I kept the whole 2015-16 season data, and ended up breaking that down for for Steph Curry.
+
+```{R}
+# Import & Trim Data
+NBA <- read.csv("NBA16.csv")
+Dubs <- NBA[NBA$nameTeam == "Golden State Warri",]
+Steph <- Dubs[Dubs$namePlayer == "Stephen Curry",]
+```
+
+## Courts
+
+Not shown for space in the PDF, below is the code to create the custom courts used in the following illustrations.
+
+```{R, include=F}
+# Custom Cavaliers Court
+wine <- "#860038"
+gold <- "#FDBB30"
+navy <- "#041E42"
+wood_dark <- "#FAD397"
+wood_light <- "#FFFFC9"
+cavs_court <- geom_basketball("NBA", display_range="offense", rotation = 90,
+                color_updates = list(
+                  court_apron = navy,
+                  endline = gold,
+                  sideline = gold,
+                  division_line = navy,
+                  
+                  center_circle_outline = gold,
+                  center_circle_fill = wine,
+                  
+                  painted_area = wine,
+                  restricted_arc = gold,
+                  lane_boundary = gold,
+                  free_throw_circle_outline = navy,
+                  free_throw_circle_dash = gold,
+                  lane_space_mark = gold,
+                  lane_lower_defensive_box = gold,
+            
+                  inbounding_line = navy,
+                  substitution_line = gold,
+                  
+                  backboard = "gray",
+
+                  defensive_half_court = wood_light,
+                  offensive_half_court = wood_light,
+                  two_point_range = wood_dark,
+                  free_throw_circle_fill = wood_dark
+                )
+              )
+# Custom Warriors Court
+gold <- "#FFC72C"
+blue <- "#1D428A"
+wood <- "#FFFFC9"
+dubs_court <- geom_basketball("NBA", display_range = "offense",
+                color_updates = list(
+                  court_apron = gold,
+                  endline = blue,
+                  sideline = blue,
+                  division_line = blue,
+                  
+                  center_circle_outline = gold,
+                  center_circle_fill = blue,
+                  
+                  painted_area = gold,
+                  restricted_arc = blue,
+                  lane_boundary = blue,
+                  free_throw_circle_outline = blue,
+                  free_throw_circle_dash = blue,
+                  lane_space_mark = blue,
+                  lane_lower_defensive_box = blue,
+            
+                  inbounding_line = blue,
+                  substitution_line = blue,
+                  
+                  backboard = "gray",
+
+                  defensive_half_court = wood,
+                  offensive_half_court = wood,
+                  two_point_range = wood,
+                  free_throw_circle_fill = wood
+                )
+              )
+```
+
+## LeBron James Data
+
+### 57 Point Game vs WAS 11/3/2017
+
+```{R, echo=F}
+# Scale Shot Locations
+LeBron_shots$Y <- 42 - (LeBron_shots$locationY/10)
+LeBron_shots$X <- (LeBron_shots$locationX/10)
+# Create Shot Chart
+cavs_court + geom_point(LeBron_shots, 
+                        mapping = aes(x=X, y=Y, color = typeEvent),
+                        size = 3) + 
+             scale_color_manual(values=c("green3", "red")) + 
+             ggtitle("LeBron James 57 Point Game")
+
+```
+
+Obviously LeBron can score at the rim, but one of the best scorers in the NBA had a very balanced night against the Wizards. Shots came from both sides with varying distance. 
+
+## Steph Curry Data
+
+While LeBron scores a lot, he doesn't shoot as many threes as Steph Curry, who earned back to back MVP awards in 2015 and 2016. It might be more interesting to explore shot charts and heat maps for a shooter with greater range and takes less layups and dunks. The following shot chart shows results from Curry's 2015-16 season. 
+
+```{R}
+# Curry whole season - scale shot location
+Steph$X <- (42- (Steph$locationY/10))
+Steph$Y <- -Steph$locationX/10
+# Shot Chart
+dubs_court + geom_point(Steph, mapping=aes(x=X, y=Y, color=typeEvent)) + 
+  scale_color_manual(values=c("green3", "red"))
+```
+
+During the 2015-16 season, Steph Curry shot a record 402 threes en route to MVP. The shot chart almost gets too cluttered to tell much, however we can see he liked to chuck up extremely deep threes (game winners? at least 1 in OKC) from mostly the left side.
+
+```{R}
+# Limit to just three pointers
+threes <- Steph[Steph$typeShot == "3PT Field Goal",]
+# Heat map colors
+heat_cols <- paletteer::paletteer_d("RColorBrewer::YlOrRd",
+                                       n = 9, direction = -1)
+# Heat map of 3 point locations
+dubs_court + geom_density_2d_filled(threes,mapping=aes(x=X, y=Y),
+                                    contour_var = "ndensity", show.legend=F,
+                                    breaks = seq(0.25, 1.0, length.out = 10)) +
+  scale_fill_manual(values = c(heat_cols),
+                    aesthetics = c("fill", "color"))
+```
+
+Visualizing those 402 three pointers with a heatmap can help show the preferred locations. Obviously shooters like the corners, but it looks like Steph had many attempts from the top of the arc. I would imagine this is due to the Warrior's frequent use of high screens paired with Curry's amazing ball-handling. The shots come from mostly the center, with him favoring the right side slightly when toeing the line. 
+
+### Highest Scoring Night - 53 pts @ NOP - 10/31/2015
+
+```{R}
+# Filter data
+NOP <- Steph[Steph$dateGame==20151031,]
+# Only makes
+NOP_makes <- NOP[NOP$isShotMade==T,]
+
+# Shot chart
+s <- dubs_court + geom_point(NOP, mapping=aes(x=X, y=Y, color=typeEvent),
+                        size=3) + 
+  scale_color_manual(values=c("green3", "red")) + 
+  theme(legend.position = "none")
+# Heat Map
+h <- dubs_court + geom_density_2d_filled(NOP_makes, mapping=aes(x=X, y=Y),
+                                    contour_var = "ndensity", show.legend=F,
+                                    breaks = seq(0.4, 1, length.out = 15))
+# Plot
+s + h
+```
+
+Looking at Curry's best scoring night from the season, we can see he took a balanced selection of shots, but made more from distance from the wings (this heatmap shows only the makes). This seems to be a weird night, considering missed threes from the corner and straight away, but making up for it in other places.
